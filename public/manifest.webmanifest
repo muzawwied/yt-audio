@@ -1,0 +1,11 @@
+{
+  "name": "Putar Audio YouTube",
+  "short_name": "Putar Audio",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0b1a",
+  "theme_color": "#0f0b1a",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
