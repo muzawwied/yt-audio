@@ -260,6 +260,34 @@
     }
   }
 
+  // Blokir bot YouTube bersifat acak per IP: coba ulang beberapa kali dengan jeda,
+  // supaya permintaan mendarat di server Cloudflare yang berbeda.
+  async function resolveWithRetry(url, maxTry) {
+    maxTry = maxTry || 4;
+    var lastErr = null;
+    for (var attempt = 1; attempt <= maxTry; attempt++) {
+      try {
+        var res = await fetch('/api/resolve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url })
+        });
+        var data = await res.json();
+        if (res.ok) return data;
+        lastErr = new Error(data.error || 'Gagal mengambil audio.');
+        if (!/blokir bot|sign in|not a bot/i.test(lastErr.message)) throw lastErr;
+      } catch (e) {
+        lastErr = e;
+        if (!/blokir bot|sign in|not a bot|Failed to fetch/i.test(e.message || '')) throw e;
+      }
+      if (attempt < maxTry) {
+        setMsg('YouTube menolak sementara, mencoba lagi (' + attempt + '/' + (maxTry - 1) + ')…');
+        await new Promise(function (r) { setTimeout(r, 1200 + attempt * 900); });
+      }
+    }
+    throw lastErr || new Error('Gagal mengambil audio.');
+  }
+
   async function addLinks() {
     var lines = input.value.split(/\s+/).map(function (s) { return s.trim(); }).filter(Boolean);
     if (!lines.length) { setMsg('Tempel dulu tautan YouTube-nya.', 'err'); return; }
@@ -271,13 +299,7 @@
       if (!/youtu\.?be/.test(url)) { continue; }
       setMsg('Mengambil lagu ' + (added + 1) + ' dari ' + lines.length + '…');
       try {
-        var res = await fetch('/api/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: url })
-        });
-        var data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Gagal mengambil audio.');
+        var data = await resolveWithRetry(url);
         if (!queue.some(function (q) { return q.id === data.id; })) {
           queue.push(data);
           added++;

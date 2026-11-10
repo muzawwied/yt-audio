@@ -2,34 +2,36 @@
 // Beberapa client dipakai bergiliran karena YouTube sesekali menolak satu client
 // dengan "Sign in to confirm you're not a bot" (terutama dari IP datacenter).
 
-const IOS_UA = 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)';
-const VR_UA = 'com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12; GB) gzip';
-const ANDROID_UA = 'com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip';
+const IOS_UA = 'com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)';
+const VR_UA = 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+const ANDROID_UA = 'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip';
 
+// Versi client mengikuti yang terbaru dipakai klien resmi: versi lama lebih
+// sering ditandai bot oleh YouTube.
 const CLIENTS = [
   {
     name: 'IOS',
-    version: '20.10.4',
+    version: '21.26.4',
     ua: IOS_UA,
-    extra: { deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.1.0.22B83' },
+    extra: { deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.3.2.22D82' },
   },
   {
     name: 'ANDROID_VR',
-    version: '1.61.48',
+    version: '1.65.10',
     ua: VR_UA,
-    extra: { androidSdkVersion: 32, osName: 'Android', osVersion: '12', deviceMake: 'Oculus', deviceModel: 'Quest 3' },
-  },
-  {
-    name: 'IOS',
-    version: '19.45.4',
-    ua: IOS_UA,
-    extra: { deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.1.0.22B83' },
+    extra: {
+      androidSdkVersion: 32,
+      osName: 'Android',
+      osVersion: '12L',
+      deviceMake: 'Oculus',
+      deviceModel: 'Quest 3',
+    },
   },
   {
     name: 'ANDROID',
-    version: '19.44.38',
+    version: '21.26.364',
     ua: ANDROID_UA,
-    extra: { androidSdkVersion: 34, osName: 'Android', osVersion: '14' },
+    extra: { androidSdkVersion: 30, osName: 'Android', osVersion: '11' },
   },
 ];
 
@@ -122,15 +124,25 @@ async function callPlayer(id, client, visitorData) {
   return res.json();
 }
 
-/** Ambil detail + URL audio langsung untuk sebuah video id. */
+/** Jeda kecil: menyela ritme permintaan supaya blokir bot tidak menempel. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Ambil detail + URL audio langsung untuk sebuah video id.
+ * Blokir bot dari YouTube sering bersifat per-permintaan, jadi rantai client
+ * diulang beberapa putaran sebelum menyerah.
+ */
 export async function resolveAudio(id) {
   const errors = [];
   let visitorData = '';
+  const ROUNDS = 4;
 
+  for (let round = 0; round < ROUNDS; round++) {
+  if (round > 0) await sleep(350 + Math.floor(Math.random() * 450));
   for (let i = 0; i < CLIENTS.length; i++) {
     const client = CLIENTS[i];
     // Visitor data dicoba mulai percobaan kedua
-    if (i === 1 && !visitorData) visitorData = await getVisitorData();
+    if ((round > 0 || i === 1) && !visitorData) visitorData = await getVisitorData();
 
     let data;
     try {
@@ -166,6 +178,7 @@ export async function resolveAudio(id) {
       duration: Number(details.lengthSeconds) || 0,
       client: client.name,
     };
+  }
   }
 
   const joined = errors.join(' | ');
