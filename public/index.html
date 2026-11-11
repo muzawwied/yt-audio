@@ -58,6 +58,8 @@
   .meta .t { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .meta .a { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
   .del { background: transparent; color: var(--muted); font-size: 18px; padding: 6px 8px; line-height: 1; }
+  .dl { background: var(--surface-2); color: var(--accent-2); font-size: 16px; padding: 7px 10px; line-height: 1; border-radius: 10px; }
+  .dl:active { opacity: .7; }
   .empty { color: var(--muted); font-size: 13px; padding: 14px 2px; }
 
   .player {
@@ -107,6 +109,7 @@
       <button id="prev" title="Sebelumnya">⏮</button>
       <button class="play" id="play" title="Putar">▶</button>
       <button id="next" title="Berikutnya">⏭</button>
+      <button id="dl" title="Unduh lagu ini">⤓</button>
       <div class="bar"><i id="progress"></i></div>
       <div class="time" id="time">0:00 / 0:00</div>
     </div>
@@ -189,6 +192,16 @@
       aa.textContent = (t.artist || 'YouTube') + (t.duration ? ' · ' + fmt(t.duration) : '');
       meta.appendChild(tt);
       meta.appendChild(aa);
+      var dl = document.createElement('button');
+      dl.className = 'dl';
+      dl.type = 'button';
+      dl.textContent = '⤓';
+      dl.setAttribute('aria-label', 'Unduh');
+      dl.title = 'Unduh audio';
+      dl.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        downloadTrack(t);
+      });
       var del = document.createElement('button');
       del.className = 'del';
       del.type = 'button';
@@ -200,6 +213,7 @@
       });
       row.appendChild(img);
       row.appendChild(meta);
+      row.appendChild(dl);
       row.appendChild(del);
       row.addEventListener('click', function () { playAt(i); });
       elTracks.appendChild(row);
@@ -292,6 +306,18 @@
     throw lastErr || new Error('Gagal mengambil audio.');
   }
 
+  // Unduh audio utuh sebagai file, supaya bisa diputar offline tanpa kena blokir.
+  function downloadTrack(t) {
+    if (!t || !t.id) return;
+    var a = document.createElement('a');
+    a.href = '/api/download/' + t.id;
+    a.download = (t.title || 'audio') + '.m4a';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setMsg('Mulai mengunduh: ' + (t.title || 'audio') + '. Cek notifikasi atau folder Unduhan.', 'ok');
+  }
+
   async function addLinks() {
     var lines = input.value.split(/\s+/).map(function (s) { return s.trim(); }).filter(Boolean);
     if (!lines.length) { setMsg('Tempel dulu tautan YouTube-nya.', 'err'); return; }
@@ -347,6 +373,11 @@
       audio.pause();
       btnPlay.textContent = '▶';
     }
+  });
+
+  document.getElementById('dl').addEventListener('click', function () {
+    if (index === -1 || !queue[index]) { setMsg('Pilih lagu dulu.', 'err'); return; }
+    downloadTrack(queue[index]);
   });
 
   document.getElementById('next').addEventListener('click', function () {

@@ -1,9 +1,19 @@
 import { resolveAudio } from '../../_lib/youtube.js';
 
-// URL audio di-cache per-colo (Cache API) supaya permintaan stream berikutnya
-// tidak perlu resolve ulang — resolve ulang itulah yang paling sering kena blokir bot.
-const TTL_SECONDS = 45 * 60;
-const CACHE_ORIGIN = 'https://yt-audio-cache.internal';
+// Sumber audio (googlevideo) memotong permintaan rentang terbuka, dan URL-nya
+// terikat IP server yang me-resolve. Karena itu aliran disusun per potongan
+// internal lalu dikirim sebagai satu respons utuh.
+
+const CHUNK = 4 * 1024 * 1024;
+const MAX_TOTAL = 120 * 1024 * 1024;
+const CACHE_TTL = 45 * 60 * 1000;
+const BROWSER_UA =
+  'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** id -> { audioUrl, mime, total, exp } */
+const mem = new Map();
 
 function jsonErr(message, status = 400) {
   return new Response(JSON.stringify({ error: message }), {
@@ -12,30 +22,32 @@ function jsonErr(message, status = 400) {
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 function cacheKey(id) {
-  return new Request(CACHE_ORIGIN + '/audio/' + id, { method: 'GET' });
+  return new Request('https://yt-audio-cache.internal/audio/' + id, { method: 'GET' });
 }
 
 async function readCache(id) {
+  const hit = mem.get(id);
+  if (hit && hit.exp > Date.now()) return hit;
   try {
-    const hit = await caches.default.match(cacheKey(id));
-    if (!hit) return null;
-    const data = await hit.json();
-    return data && data.audioUrl && data.exp > Date.now() ? data : null;
+    const res = await caches.default.match(cacheKey(id));
+    if (!res) return null;
+    const data = await res.json();
+    if (!data || !data.audioUrl || data.exp < Date.now()) return null;
+    mem.set(id, data);
+    return data;
   } catch {
     return null;
   }
 }
 
 async function writeCache(entry) {
+  mem.set(entry.id, entry);
   try {
-    const body = JSON.stringify({ audioUrl: entry.audioUrl, mime: entry.mime, exp: Date.now() + TTL_SECONDS * 1000 });
     await caches.default.put(
       cacheKey(entry.id),
-      new Response(body, {
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=' + TTL_SECONDS },
+      new Response(JSON.stringify(entry), {
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=2700' },
       })
     );
   } catch {
@@ -43,47 +55,88 @@ async function writeCache(entry) {
   }
 }
 
-/** Resolve dengan beberapa percobaan: blokir bot bersifat acak. */
-async function resolveWithRetry(id, attempts = 3) {
+async function resolveWithRetry(id, attempts = 4) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try {
       const a = await resolveAudio(id);
-      await writeCache({ id, audioUrl: a.audioUrl, mime: a.mime });
-      return { audioUrl: a.audioUrl, mime: a.mime };
+      const head = await fetch(a.audioUrl, {
+        headers: { 'User-Agent': BROWSER_UA, Range: 'bytes=0-' + (CHUNK - 1), Accept: '*/*' },
+        redirect: 'follow',
+      });
+      if (!head.ok && head.status !== 206) {
+        lastErr = new Error('Sumber audio menolak permintaan (' + head.status + ').');
+        continue;
+      }
+      const crange = head.headers.get('content-range') || '';
+      const m = crange.match(/\/(\d+)/) || crange.match(/^bytes \d+-\d+\/(\d+)/);
+      const total = m ? parseInt(m[1], 10) : parseInt(head.headers.get('content-length') || '0', 10) || 0;
+      const firstBuf = new Uint8Array(await head.arrayBuffer());
+      const entry = {
+        id,
+        audioUrl: a.audioUrl,
+        mime: head.headers.get('content-type') || a.mime,
+        total,
+        exp: Date.now() + CACHE_TTL,
+      };
+      await writeCache(entry);
+      return { entry, firstBuf };
     } catch (e) {
       lastErr = e;
-      if (!/bot|sign in|login/i.test(e.message || '')) break;
-      if (i < attempts - 1) await sleep(250 + i * 350);
+      if (!/bot|sign in|login|menolak/i.test(e.message || '')) break;
+      if (i < attempts - 1) await sleep(200 + i * 300);
     }
   }
   throw lastErr || new Error('Gagal menyiapkan audio.');
 }
 
-const BROWSER_UA =
-  'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
-
-const CHUNK = 2 * 1024 * 1024; // 2 MB per permintaan
-
-/**
- * Rentang terbuka ("bytes=0-") membuat sumber memotong stream di tengah,
- * jadi selalu kita minta potongan berukuran tetap. Browser akan meminta
- * potongan berikutnya sendiri saat butuh.
- */
-function boundedRange(range) {
-  if (!range) return { range: 'bytes=0-' + (CHUNK - 1), bounded: true, start: 0 };
-  const m = String(range).match(/bytes=(\d*)-(\d*)/);
-  if (!m) return { range: 'bytes=0-' + (CHUNK - 1), bounded: true, start: 0 };
-  const start = m[1] ? parseInt(m[1], 10) : 0;
-  const endGiven = m[2] ? parseInt(m[2], 10) : null;
-  const end = endGiven === null || endGiven - start + 1 > CHUNK ? start + CHUNK - 1 : endGiven;
-  return { range: 'bytes=' + start + '-' + end, bounded: true, start, end };
+function fetchRange(url, start, end) {
+  return fetch(url, {
+    headers: { 'User-Agent': BROWSER_UA, Range: 'bytes=' + start + '-' + end, Accept: '*/*' },
+    redirect: 'follow',
+  });
 }
 
-async function fetchUpstream(audioUrl, range) {
-  const headers = { 'User-Agent': BROWSER_UA, Accept: '*/*' };
-  if (range) headers.Range = range;
-  return fetch(audioUrl, { headers, redirect: 'follow' });
+/** Aliran utuh: potongan pertama sudah di tangan, sisanya diambil berurutan. */
+function fullStream(id, entry, firstBuf) {
+  let offset = firstBuf.byteLength;
+  const total = entry.total || 0;
+  return new ReadableStream({
+    start(controller) {
+      if (firstBuf.byteLength) controller.enqueue(firstBuf);
+      if (total && offset >= total) controller.close();
+    },
+    async pull(controller) {
+      try {
+        if (total && offset >= total) {
+          controller.close();
+          return;
+        }
+        const end = total ? Math.min(offset + CHUNK - 1, total - 1) : offset + CHUNK - 1;
+        let res = await fetchRange(entry.audioUrl, offset, end);
+        if (!res.ok && res.status !== 206) {
+          // URL kedaluwarsa di tengah jalan: resolve ulang lalu lanjutkan
+          const fresh = await resolveWithRetry(id, 2);
+          entry.audioUrl = fresh.entry.audioUrl;
+          if (!entry.total) entry.total = fresh.entry.total;
+          res = await fetchRange(entry.audioUrl, offset, end);
+        }
+        if (!res.ok && res.status !== 206) {
+          controller.error(new Error('Sumber audio menolak permintaan (' + res.status + ')'));
+          return;
+        }
+        const buf = new Uint8Array(await res.arrayBuffer());
+        if (!buf.byteLength) {
+          controller.close();
+          return;
+        }
+        offset += buf.byteLength;
+        controller.enqueue(buf);
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+  });
 }
 
 export async function onRequestGet({ params, request }) {
@@ -92,54 +145,65 @@ export async function onRequestGet({ params, request }) {
   if (!id) return jsonErr('ID video tidak valid.');
 
   const clientRange = request.headers.get('Range') || '';
-  const span = boundedRange(clientRange);
-  const range = span.range;
+  const askedFromStart = !clientRange || /^bytes=0-(\d*)$/.test(clientRange);
 
-  let src = await readCache(id);
-  if (!src) {
+  let entry = await readCache(id);
+  let firstBuf = null;
+
+  if (!entry || askedFromStart) {
     try {
-      src = await resolveWithRetry(id);
+      const fresh = await resolveWithRetry(id);
+      entry = fresh.entry;
+      firstBuf = fresh.firstBuf;
     } catch (e) {
-      return jsonErr(e.message || 'Gagal menyiapkan audio.', 502);
+      if (!entry) return jsonErr(e.message || 'Gagal menyiapkan audio.', 502);
     }
   }
 
-  let upstream;
+  if (!entry) return jsonErr('Gagal menyiapkan audio.', 502);
+  if (entry.total && entry.total > MAX_TOTAL) {
+    return jsonErr('File terlalu besar (' + Math.round(entry.total / 1048576) + ' MB).', 413);
+  }
+
+  const headers = new Headers({
+    'Content-Type': entry.mime || 'audio/mp4',
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-store',
+  });
+
+  // Mulai dari awal: kirim seluruh file sebagai satu aliran (paling stabil untuk
+  // lagu panjang dan untuk pemutaran latar belakang).
+  if (askedFromStart) {
+    if (entry.total) headers.set('Content-Length', String(entry.total));
+    return new Response(fullStream(id, entry, firstBuf || new Uint8Array(0)), { status: 200, headers });
+  }
+
+  // Lompat ke posisi tertentu (seek): layani satu potongan berukuran tetap.
+  const m = clientRange.match(/bytes=(\d+)-(\d*)/);
+  const start = m ? parseInt(m[1], 10) : 0;
+  const endGiven = m && m[2] ? parseInt(m[2], 10) : null;
+  const end = endGiven === null || endGiven - start + 1 > CHUNK ? start + CHUNK - 1 : endGiven;
+  const finalEnd = entry.total ? Math.min(end, entry.total - 1) : end;
+
   try {
-    upstream = await fetchUpstream(src.audioUrl, range);
-  } catch {
-    upstream = null;
-  }
-
-  // URL bisa kedaluwarsa atau terikat IP colo lain: resolve ulang lalu coba sekali lagi.
-  if (!upstream || (!upstream.ok && upstream.status !== 206)) {
-    try {
-      src = await resolveWithRetry(id);
-      upstream = await fetchUpstream(src.audioUrl, range);
-    } catch (e) {
-      return jsonErr(e.message || 'Gagal menyiapkan audio.', 502);
+    let res = await fetchRange(entry.audioUrl, start, finalEnd);
+    if (!res.ok && res.status !== 206) {
+      const fresh = await resolveWithRetry(id, 2);
+      entry = fresh.entry;
+      res = await fetchRange(entry.audioUrl, start, finalEnd);
     }
+    if (!res.ok && res.status !== 206) {
+      return jsonErr('Sumber audio menolak permintaan (' + res.status + ').', 502);
+    }
+    const len = res.headers.get('content-length');
+    const crange = res.headers.get('content-range');
+    if (len) headers.set('Content-Length', len);
+    if (crange) headers.set('Content-Range', crange);
+    else if (entry.total) headers.set('Content-Range', 'bytes ' + start + '-' + finalEnd + '/' + entry.total);
+    return new Response(res.body, { status: 206, headers });
+  } catch (e) {
+    return jsonErr(e.message || 'Gagal menyiapkan audio.', 502);
   }
-
-  if (!upstream.ok && upstream.status !== 206) {
-    return jsonErr('Sumber audio menolak permintaan (' + upstream.status + ').', 502);
-  }
-
-  const headers = new Headers();
-  headers.set('Content-Type', upstream.headers.get('content-type') || src.mime || 'audio/mp4');
-  headers.set('Accept-Ranges', 'bytes');
-  headers.set('Cache-Control', 'no-store');
-  const len = upstream.headers.get('content-length');
-  const crange = upstream.headers.get('content-range');
-  if (len) headers.set('Content-Length', len);
-  if (crange) headers.set('Content-Range', crange);
-
-  // Kalau klien tidak minta range apa pun, tetap balas 200 dengan potongan pertama
-  // supaya pemutar bisa mulai, lalu meminta sisanya lewat Range.
-  if (!clientRange) {
-    headers.set('Content-Range', 'bytes 0-' + (CHUNK - 1) + '/*');
-  }
-  return new Response(upstream.body, { status: 206, headers });
 }
 
 export async function onRequestHead(context) {
