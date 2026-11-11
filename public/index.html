@@ -112,7 +112,7 @@
     </div>
   </div>
 
-  <audio id="audio" preload="none"></audio>
+  <audio id="audio" preload="auto"></audio>
 
 <script>
 (function () {
@@ -230,6 +230,8 @@
     }
     npTitle.textContent = t.title || 'Tanpa judul';
     npArtist.textContent = t.artist || 'YouTube';
+    // Tampilkan durasi dari data lagu supaya tidak terlihat 0:00 sebelum audio siap
+    timeEl.textContent = '0:00 / ' + fmt(t.duration || 0);
     if (t.thumb) npThumb.src = t.thumb; else npThumb.removeAttribute('src');
     document.title = (t.title || 'Audio') + ' · Putar Audio';
     if ('mediaSession' in navigator && window.MediaMetadata) {
@@ -250,6 +252,8 @@
     index = i;
     render();
     updateNowPlaying(t);
+    loadRetry = 0;
+    audio.preload = 'auto';
     audio.src = t.stream;
     try {
       await audio.play();
@@ -354,6 +358,7 @@
     playAt((index - 1 + queue.length) % queue.length);
   });
 
+  audio.addEventListener('loadingdata', function () { loadRetry = 0; });
   audio.addEventListener('play', function () { btnPlay.textContent = '⏸'; });
   audio.addEventListener('pause', function () { btnPlay.textContent = '▶'; });
   audio.addEventListener('timeupdate', function () {
@@ -366,8 +371,21 @@
     if (index + 1 < queue.length) playAt(index + 1);
     else btnPlay.textContent = '▶';
   });
+  // Kalau audio gagal dimuat (mis. URL sumber kedaluwarsa / kena blokir sesaat),
+  // coba muat ulang otomatis beberapa kali sebelum menyerah.
+  var loadRetry = 0;
   audio.addEventListener('error', function () {
-    setMsg('Audio gagal dimuat. Coba tekan putar lagi.', 'err');
+    var t = queue[index];
+    if (t && loadRetry < 3) {
+      loadRetry++;
+      setMsg('Menyambung ulang audio (' + loadRetry + '/3)…');
+      setTimeout(function () {
+        audio.src = t.stream + '?r=' + Date.now();
+        audio.play().then(function () { btnPlay.textContent = '⏸'; }).catch(function () {});
+      }, 900 * loadRetry);
+      return;
+    }
+    setMsg('Audio gagal dimuat. Tekan putar sekali lagi, kalau masih gagal coba lagu lain.', 'err');
   });
 
   if ('mediaSession' in navigator) {

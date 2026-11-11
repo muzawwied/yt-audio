@@ -19,6 +19,15 @@ export async function onRequestPost({ request }) {
 
   try {
     const a = await resolveAudio(id);
+    try {
+      // Simpan URL audio di cache colo supaya permintaan /api/stream tidak perlu resolve ulang.
+      await caches.default.put(
+        new Request('https://yt-audio-cache.internal/audio/' + id),
+        new Response(JSON.stringify({ audioUrl: a.audioUrl, mime: a.mime, exp: Date.now() + 45 * 60 * 1000 }), {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=2700' },
+        })
+      );
+    } catch (e) {}
     return json({
       id: a.id,
       title: a.title,
